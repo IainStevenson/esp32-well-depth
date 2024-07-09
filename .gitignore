@@ -1,0 +1,9 @@
+.pio
+CMakeLists.txt
+.travis.yml
+sdkconfig.defaults
+sdkconfig.esp32dev
+.vscode/c_cpp_properties.json
+.vscode/extensions.json
+.vscode/launch.json
+src/MyWIFICreds.h
