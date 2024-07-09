@@ -9,7 +9,7 @@
 
 const int triggerPin = 5;
 const int echoPin = 18;
-const float totalDepth = 250.0; // Total depth in CM
+const float totalDepth = 300.0; // Total depth in CM
 
 // Time client
 WiFiUDP ntpUDP;
