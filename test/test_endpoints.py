@@ -3,7 +3,7 @@ import json
 import time
 
 # Configuration
-ESP32_IP = "192.168.0.100"  # Replace with the actual IP address of your ESP32
+ESP32_IP = "192.168.0.107"  # Replace with the actual IP address of your ESP32
 BASE_URL = f"http://{ESP32_IP}"
 
 def test_root_endpoint():
@@ -26,7 +26,7 @@ def test_data_endpoint():
 
 def test_data_reset_endpoint():
     print("Testing data&reset endpoint...")
-    url = f"{BASE_URL}/data&reset"
+    url = f"{BASE_URL}/data?reset"
     response = requests.get(url)
     assert response.status_code == 200
     json_response = response.json()

@@ -146,7 +146,7 @@ void setup() {
     });
 
     // Endpoint to get the data and then reset the ESP
-    server.on("/data&reset", HTTP_GET, [](AsyncWebServerRequest *request) {
+    server.on("/data?reset", HTTP_GET, [](AsyncWebServerRequest *request) {
         String jsonResponse;
         DynamicJsonDocument doc(1024);
         for (auto &data : sensorData) {
