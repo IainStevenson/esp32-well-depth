@@ -1,175 +1,218 @@
+#include <Arduino.h>
 #include <WiFi.h>
 #include <NTPClient.h>
 #include <WiFiUdp.h>
 #include <ESPAsyncWebServer.h>
 #include <ArduinoJson.h>
-#include <freertos/FreeRTOS.h>
-#include <freertos/semphr.h>
+#include <time.h>
 #include "MyWIFICreds.h"
 
-const int triggerPin = 5;
-const int echoPin = 18;
-const float totalDepth = 300.0; // Total depth in CM
+// Constants and Globals
+const int TRIGGER_PIN = 5;
+const int ECHO_PIN = 18;
+const int MAX_DEPTH_CM = 300;
+const int MEASURE_INTERVAL = 10000; // 10 seconds
+const unsigned long RETRY_INTERVAL = 180000; // 3 minutes
+const float SPEED_OF_SOUND_CM_US = 0.0343;
 
-// Time client
 WiFiUDP ntpUDP;
-NTPClient timeClient(ntpUDP, "pool.ntp.org", 0, 60000);
-
-// Web server
+NTPClient timeClient(ntpUDP, "pool.ntp.org");
 AsyncWebServer server(80);
 
-// Data structure
-struct DepthData {
+struct SensorData {
+    unsigned long timestamp;  // Store timestamp as unsigned long
     float depth;
-    unsigned long time;
 };
 
-// Define array size and mutex
-const int arraySize = 100; // Adjust size based on available memory (example value)
-DepthData depthArray[arraySize];
-int currentIndex = 0;
-SemaphoreHandle_t dataMutex;
+std::vector<SensorData> sensorData;
+unsigned long lastMeasureTime = 0;
+unsigned long lastNetworkCheckTime = 0;
+
+// Function to connect to the best available WiFi network
+void connectToWiFi() {
+    int bestRSSI = -9999;
+    String bestSSID = "";
+    
+    // If preferred SSID is defined, try to connect
+    if (preferredSSID && strlen(preferredSSID) > 0) {
+        WiFi.begin(preferredSSID, wifiPassword);
+        Serial.print("Connecting to preferred SSID: ");
+        Serial.println(preferredSSID);
+        
+        unsigned long startTime = millis();
+        while (WiFi.status() != WL_CONNECTED && millis() - startTime < 10000) { // 10 second timeout
+            delay(500);
+            Serial.print(".");
+        }
+
+        // If connected, print the MAC address and return
+        if (WiFi.status() == WL_CONNECTED) {
+            Serial.println(" Connected!");
+            Serial.print("IP Address: ");
+            Serial.println(WiFi.localIP());
+            Serial.print("MAC Address: ");
+            Serial.println(WiFi.macAddress());
+            return;
+        } else {
+            Serial.println(" Failed to connect to preferred SSID.");
+        }
+    }
+
+    // Scan for available networks
+    Serial.println("Scanning for available networks...");
+    int n = WiFi.scanNetworks();
+    if (n == 0) {
+        Serial.println("No networks found. Retrying...");
+        delay(10000); // Wait 10 seconds before retrying
+        return;
+    }
+
+    // Find the best SSID with the strongest RSSI
+    for (int i = 0; i < n; ++i) {
+        String ssid = WiFi.SSID(i);
+        int32_t rssi = WiFi.RSSI(i);
+        if (rssi > bestRSSI) {
+            bestRSSI = rssi;
+            bestSSID = ssid;
+        }
+    }
+
+    // Connect to the best available SSID
+    if (bestSSID.length() > 0) {
+        Serial.print("Connecting to best available SSID: ");
+        Serial.println(bestSSID);
+        WiFi.begin(bestSSID.c_str(), wifiPassword);
+        
+        unsigned long startTime = millis();
+        while (WiFi.status() != WL_CONNECTED && millis() - startTime < 10000) { // 10 second timeout
+            delay(500);
+            Serial.print(".");
+        }
+
+        // Print connection details
+        if (WiFi.status() == WL_CONNECTED) {
+            Serial.println(" Connected!");
+            Serial.print("IP Address: ");
+            Serial.println(WiFi.localIP());
+            Serial.print("MAC Address: ");
+            Serial.println(WiFi.macAddress());
+        } else {
+            Serial.println(" Failed to connect to any SSID.");
+        }
+    }
+}
+
+// Function to format the time as "YYYY-MM-DD HH:MM:SS"
+String formatTimestamp(unsigned long epochTime) {
+    time_t rawTime = (time_t)epochTime;
+    struct tm *timeInfo = localtime(&rawTime);
+    char buffer[20];
+    strftime(buffer, sizeof(buffer), "%Y-%m-%d %H:%M:%S", timeInfo);
+    return String(buffer);
+}
 
 void setup() {
     Serial.begin(115200);
+    pinMode(TRIGGER_PIN, OUTPUT);
+    pinMode(ECHO_PIN, INPUT);
 
-    // Initialize sensor pins
-    pinMode(triggerPin, OUTPUT);
-    pinMode(echoPin, INPUT);
+    connectToWiFi();
 
-    // Connect to Wi-Fi
-    WiFi.begin(ssid, password);
-    while (WiFi.status() != WL_CONNECTED) {
-        delay(1000);
-        Serial.println("Connecting to WiFi...");
-    }
-    Serial.println("Connected to WiFi");
-
-    // Initialize time client
     timeClient.begin();
+    timeClient.update();
 
-    // Initialize mutex
-    dataMutex = xSemaphoreCreateMutex();
-
-    // Start web server
+    // Root endpoint to show device information
     server.on("/", HTTP_GET, [](AsyncWebServerRequest *request) {
-        request->send(200, "text/plain", "Hello, this is the ESP32!");
+        String response = "IP Address: " + WiFi.localIP().toString();
+        response += "<br>MAC Address: " + WiFi.macAddress();
+        response += "<br>UTC Time: " + timeClient.getFormattedTime();
+        response += "<br>Data Entries: " + String(sensorData.size());
+        response += "<br>Memory Used: " + String(ESP.getFreeHeap()) + " bytes";
+        request->send(200, "text/html", response);
     });
 
-    server.on("/reset", HTTP_GET, [](AsyncWebServerRequest *request) {
-        ESP.restart();
-        request->send(200, "text/plain", "Device reset initiated");
-    });
-
+    // Endpoint to get the sensor data in JSON format
     server.on("/data", HTTP_GET, [](AsyncWebServerRequest *request) {
-        xSemaphoreTake(dataMutex, portMAX_DELAY);
-        StaticJsonDocument<2000> doc; // Adjust size based on expected JSON payload
-        JsonArray data = doc.createNestedArray("data");
-        for (int i = 0; i < arraySize; ++i) {
-            if (depthArray[i].time != 0) {
-                JsonObject entry = data.createNestedObject();
-                entry["depth"] = depthArray[i].depth;
-                entry["time"] = depthArray[i].time;
-            }
+        String jsonResponse;
+        DynamicJsonDocument doc(1024);
+        for (auto &data : sensorData) {
+            JsonObject entry = doc.createNestedObject();
+            entry["timestamp"] = formatTimestamp(data.timestamp);
+            entry["depth"] = data.depth;
         }
-        // Clear the array
-        memset(depthArray, 0, sizeof(depthArray));
-        currentIndex = 0;
-        xSemaphoreGive(dataMutex);
-
-        String response;
-        serializeJson(doc, response);
-        request->send(200, "application/json", response);
+        serializeJson(doc, jsonResponse);
+        sensorData.clear();
+        request->send(200, "application/json", jsonResponse);
     });
 
-    server.on("/monitor", HTTP_GET, [](AsyncWebServerRequest *request) {
-        xSemaphoreTake(dataMutex, portMAX_DELAY);
-        String html = "<html><body><table border='1'><tr><th>Time</th><th>Depth (cm)</th></tr>";
-        for (int i = arraySize - 1; i >= 0; --i) {
-            if (depthArray[i].time != 0) {
-                char timeString[25];
-                unsigned long epochTime = depthArray[i].time;
-                struct tm *ptm = gmtime((time_t *)&epochTime);
-                sprintf(timeString, "%04d-%02d-%02d %02d:%02d:%02d",
-                        ptm->tm_year + 1900, ptm->tm_mon + 1, ptm->tm_mday,
-                        ptm->tm_hour, ptm->tm_min, ptm->tm_sec);
-                html += "<tr><td>" + String(timeString) + "</td><td>" + String(depthArray[i].depth) + "</td></tr>";
-            }
+    // Endpoint to get the data and then reset the ESP
+    server.on("/data&reset", HTTP_GET, [](AsyncWebServerRequest *request) {
+        String jsonResponse;
+        DynamicJsonDocument doc(1024);
+        for (auto &data : sensorData) {
+            JsonObject entry = doc.createNestedObject();
+            entry["timestamp"] = formatTimestamp(data.timestamp);
+            entry["depth"] = data.depth;
         }
-        html += "</table></body></html>";
-        xSemaphoreGive(dataMutex);
+        serializeJson(doc, jsonResponse);
+        sensorData.clear();
+        request->send(200, "application/json", jsonResponse);
+        delay(1000); // Wait for response to be sent before resetting
+        ESP.restart();
+    });
 
-        request->send(200, "text/html", html);
+    // Endpoint to monitor the sensor data in a table format
+    server.on("/monitor", HTTP_GET, [](AsyncWebServerRequest *request) {
+        String htmlResponse = "<table><tr><th>Timestamp</th><th>Depth (cm)</th></tr>";
+        for (auto it = sensorData.rbegin(); it != sensorData.rend(); ++it) {
+            htmlResponse += "<tr><td>" + formatTimestamp(it->timestamp) + "</td><td>" + String(it->depth) + "</td></tr>";
+        }
+        htmlResponse += "</table>";
+        request->send(200, "text/html", htmlResponse);
     });
 
     server.begin();
 }
 
+// Function to measure the distance using the ultrasonic sensor
 float measureDistance() {
-    // Clear the trigger pin
-    digitalWrite(triggerPin, LOW);
+    digitalWrite(TRIGGER_PIN, LOW);
     delayMicroseconds(2);
-
-    // Send a 10us pulse to the trigger pin
-    digitalWrite(triggerPin, HIGH);
+    digitalWrite(TRIGGER_PIN, HIGH);
     delayMicroseconds(10);
-    digitalWrite(triggerPin, LOW);
-
-    // Read the echo pin
-    long duration = pulseIn(echoPin, HIGH);
-
-    // Calculate the distance in CM
-    if (duration == 0) {
-        return -1; // Return -1 if no pulse was detected
-    }
-
-    float distance = (duration * 0.0343) / 2;
-    return distance;
-}
-
-float calculateDepth(float distance) {
-    if (distance == -1) {
-        return -1; // Return -1 if no valid distance was measured
-    }
-    return totalDepth - distance;
-}
-
-void storeData(float depth, unsigned long time) {
-    // Protect array access with mutex
-    xSemaphoreTake(dataMutex, portMAX_DELAY);
-    depthArray[currentIndex] = {depth, time};
-    currentIndex = (currentIndex + 1) % arraySize;
-    xSemaphoreGive(dataMutex);
+    digitalWrite(TRIGGER_PIN, LOW);
+    
+    long duration = pulseIn(ECHO_PIN, HIGH);
+    float distanceCm = duration * SPEED_OF_SOUND_CM_US / 2.0;
+    return distanceCm;
 }
 
 void loop() {
-    timeClient.update();
-    // Get current time
-    unsigned long epochTime = timeClient.getEpochTime();
-    // Convert epoch time to human-readable format
-    struct tm *ptm = gmtime((time_t *)&epochTime);
-    char timeString[25];
-    sprintf(timeString, "%04d-%02d-%02d %02d:%02d:%02d",
-            ptm->tm_year + 1900, ptm->tm_mon + 1, ptm->tm_mday,
-            ptm->tm_hour, ptm->tm_min, ptm->tm_sec);
-
-    // Measure distance and calculate depth
-    float distance = measureDistance();
-    float depth = calculateDepth(distance);
-
-    // Store the data
-    if (depth != -1) {
-        storeData(depth, epochTime);
+    unsigned long currentTime = millis();
+    
+    // Reconnect to WiFi if disconnected and retry interval has passed
+    if (WiFi.status() != WL_CONNECTED && currentTime - lastNetworkCheckTime > RETRY_INTERVAL) {
+        connectToWiFi();
+        lastNetworkCheckTime = currentTime;
     }
 
-    // Print the results
-    Serial.print("Time: ");
-    Serial.print(timeString);
-    Serial.print(" Distance: ");
-    Serial.print(distance);
-    Serial.print(" cm Depth: ");
-    Serial.print(depth);
-    Serial.println(" cm");
+    // Update the NTP client if connected to WiFi
+    if (WiFi.status() == WL_CONNECTED) {
+        timeClient.update();
+    }
 
-    delay(10000);  // Delay for 10 seconds
+    // Measure distance and calculate water depth at regular intervals
+    if (currentTime - lastMeasureTime >= MEASURE_INTERVAL) {
+        float distance = measureDistance();
+        float depth = MAX_DEPTH_CM - distance;
+        unsigned long timestamp = WiFi.status() == WL_CONNECTED ? timeClient.getEpochTime() : millis();
+
+        // Manage sensor data in a FIFO manner
+        if (sensorData.size() >= (ESP.getFreeHeap() / 4)) {
+            sensorData.erase(sensorData.begin());
+        }
+
+        sensorData.push_back({timestamp, depth});
+        lastMeasureTime = currentTime;
+    }
 }
