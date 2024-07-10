@@ -123,11 +123,14 @@ void setup() {
 
     // Root endpoint to show device information
     server.on("/", HTTP_GET, [](AsyncWebServerRequest *request) {
-        String response = "IP Address: " + WiFi.localIP().toString();
+        String response = "<head><meta http-equiv='refresh' content='5'></head><table><body>IP Address: " + WiFi.localIP().toString();
         response += "<br>MAC Address: " + WiFi.macAddress();
         response += "<br>UTC Time: " + timeClient.getFormattedTime();
         response += "<br>Data Entries: " + String(sensorData.size());
+        response += "<br>Data Size: " + String(sizeof(sensorData)) + " bytes" ;
+        response += "<br>Data Volume: " + String(sizeof(sensorData) * sensorData.size()) + " bytes" ;
         response += "<br>Memory Used: " + String(ESP.getFreeHeap()) + " bytes";
+        response += "</body></html>";
         request->send(200, "text/html", response);
     });
 
@@ -163,11 +166,11 @@ void setup() {
 
     // Endpoint to monitor the sensor data in a table format
     server.on("/monitor", HTTP_GET, [](AsyncWebServerRequest *request) {
-        String htmlResponse = "<table><tr><th>Timestamp</th><th>Depth (cm)</th></tr>";
+                String htmlResponse = "<head><meta http-equiv='refresh' content='5'></head><table><body><tr><th>Timestamp</th><th>Depth (cm)</th></tr>";
         for (auto it = sensorData.rbegin(); it != sensorData.rend(); ++it) {
             htmlResponse += "<tr><td>" + formatTimestamp(it->timestamp) + "</td><td>" + String(it->depth) + "</td></tr>";
         }
-        htmlResponse += "</table>";
+        htmlResponse += "</table></body>";
         request->send(200, "text/html", htmlResponse);
     });
 
