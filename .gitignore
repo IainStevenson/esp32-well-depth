@@ -8,3 +8,4 @@ sdkconfig.esp32dev
 .vscode/launch.json
 MyWIFICreds.h
 
+.vscode/settings.json
